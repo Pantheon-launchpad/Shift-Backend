@@ -1,26 +1,22 @@
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
-import * as users from "./schema/users";
-import * as userProfiles from "./schema/user_profiles";
-import * as onboardingResponses from "./schema/onboarding_responses";
-import * as userSettings from "./schema/user_settings";
-import * as streaks from "./schema/streaks";
-import * as focusSessions from "./schema/focus_sessions";
-import * as subscriptions from "./schema/subscriptions";
-import * as purchases from "./schema/purchases";
+import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "./schema";
 
-const client = postgres(process.env.DATABASE_URL!);
-export const db = drizzle(client, {
-  schema: {
-    ...users,
-    ...userProfiles,
-    ...onboardingResponses,
-    ...userSettings,
-    ...streaks,
-    ...focusSessions,
-    ...subscriptions,
-    ...purchases,
-  },
+const connectionString = process.env.DATABASE_URL;
+const isLocalDb = !!connectionString && /localhost|127\.0\.0\.1/.test(connectionString);
+
+// Managed Postgres (Render, RDS, Supabase, etc.) requires SSL and presents
+// a cert not in Node's default CA bundle — `rejectUnauthorized: false`
+// still gets you an encrypted connection, just without validating the CA
+// chain, which is the standard tradeoff for these providers' free/hobby
+// tiers. Local dev Postgres has no SSL listener at all, so skip it there.
+// Set DATABASE_SSL=false to force it off (e.g. a self-hosted box with its
+// own real cert setup you want strictly validated instead).
+const sslDisabled = process.env.DATABASE_SSL === "false";
+
+export const pool = new Pool({
+  connectionString,
+  ssl: isLocalDb || sslDisabled ? undefined : { rejectUnauthorized: false },
 });
 
-export default db;
+export const db = drizzle(pool, { schema });

@@ -1,0 +1,1138 @@
+openapi: 3.0.3
+info:
+  title: Shift API
+  description: |
+    One API serving both the Shift web app and the future React Native app,
+    with zero platform-specific branching in the API layer.
+
+    * Auth uses Bearer access tokens (short-lived JWT) + rotating refresh tokens.
+    * All mutating `POST`/`PATCH` requests accept an `Idempotency-Key` header.
+    * All timestamps are ISO 8601 strings in UTC.
+    * All IDs are UUIDv4 strings.
+    * List endpoints that can grow unbounded use cursor-based pagination.
+  version: "1.0.0"
+  contact:
+    name: Shift
+servers:
+  - url: https://api.shift.app/v1
+    description: Production
+  - url: http://localhost:3000/v1
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Signup, login, session, and OAuth
+  - name: Goals
+    description: Goals and their roadmaps
+  - name: Progress
+    description: Task/milestone/streak advancement
+  - name: AI Planner
+    description: Roadmap generation and planner chat (server-side AI calls)
+  - name: Activity
+    description: Cross-goal activity log
+  - name: Build in Public
+    description: Social post drafting + card image rendering
+  - name: Notifications
+    description: In-app and push notifications
+  - name: Settings
+    description: Profile, settings, export, account deletion
+  - name: Connections
+    description: OAuth account connections
+  - name: Push Tokens
+    description: Device push token registration
+  - name: Sync
+    description: Cross-device sync fallback (poll on reconnect)
+
+paths:
+  # ---------------------------------------------------------------- AUTH
+  /auth/signup:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+                name: { type: string }
+      responses:
+        "200":
+          description: Account created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email + password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Logged in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate a refresh token for a new access/refresh pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "200":
+          description: New token pair issued; old refresh token invalidated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (revoke a single refresh token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "204": { description: Logged out }
+
+  /auth/logout-all:
+    post:
+      tags: [Auth]
+      summary: Sign out everywhere (revoke every refresh token for the user)
+      responses:
+        "204": { description: All sessions revoked }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset email
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "204":
+          description: Always 204, regardless of whether the email exists
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset password using a reset token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: { type: string }
+                newPassword: { type: string, format: password, minLength: 8 }
+      responses:
+        "204": { description: Password updated }
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Verify an email address using a verification token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "204": { description: Email verified }
+
+  /auth/oauth/{provider}/start:
+    get:
+      tags: [Auth]
+      summary: Begin an OAuth flow (sign-in or connect-account)
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/OAuthProvider"
+      responses:
+        "302": { description: Redirect to the OAuth provider }
+
+  /auth/oauth/{provider}/callback:
+    get:
+      tags: [Auth]
+      summary: OAuth provider callback
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/OAuthProvider"
+      responses:
+        "200":
+          description: |
+            Web: redirected with tokens in a one-time-use URL fragment.
+            RN: deep-linked back into the app (e.g. `shift://oauth-callback?code=...`),
+            exchanged for tokens in a follow-up POST.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+
+  # ---------------------------------------------------------------- GOALS
+  /goals:
+    get:
+      tags: [Goals]
+      summary: List goals
+      parameters:
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Array of goals
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Goal" }
+    post:
+      tags: [Goals]
+      summary: Create a goal
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, roadmap]
+              properties:
+                title: { type: string }
+                roadmap: { $ref: "#/components/schemas/Roadmap" }
+      responses:
+        "201":
+          description: Goal created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Goal" }
+
+  /goals/{id}:
+    parameters:
+      - $ref: "#/components/parameters/GoalId"
+    get:
+      tags: [Goals]
+      summary: Get a goal, including its roadmap
+      responses:
+        "200":
+          description: Full goal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Goal" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [Goals]
+      summary: Archive/unarchive a goal
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                archived: { type: boolean }
+      responses:
+        "200":
+          description: Updated goal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Goal" }
+    delete:
+      tags: [Goals]
+      summary: Hard delete a goal (rare; prefer archive)
+      responses:
+        "204": { description: Deleted }
+
+  /goals/{id}/roadmap:
+    parameters:
+      - $ref: "#/components/parameters/GoalId"
+    get:
+      tags: [Goals]
+      summary: Get milestones + tasks for a goal
+      responses:
+        "200":
+          description: Roadmap
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Roadmap" }
+
+  # ------------------------------------------------------------- PROGRESS
+  /goals/{id}/progress:
+    parameters:
+      - $ref: "#/components/parameters/GoalId"
+    post:
+      tags: [Progress]
+      summary: Log progress and advance the roadmap
+      description: |
+        Replaces both `completeDebrief` and `logProgressFromChat` from the
+        legacy frontend store. `source` is the only difference; the server
+        runs the same roadmap-advancement logic regardless of origin
+        (mark next task done -> advance milestone -> advance goal -> update streak).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [taskTitle, rawText, focusMinutes, source]
+              properties:
+                taskTitle: { type: string }
+                rawText: { type: string }
+                aiSummary:
+                  type: string
+                  description: Optional; if omitted and rawText is present, the server may generate it.
+                focusMinutes: { type: integer, minimum: 0 }
+                source: { type: string, enum: [focus_session, planner_chat] }
+      responses:
+        "200":
+          description: Progress recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  goal: { $ref: "#/components/schemas/Goal" }
+                  milestoneAdvanced: { type: boolean }
+                  goalCompleted: { type: boolean }
+                  streak: { $ref: "#/components/schemas/Streak" }
+
+  # ------------------------------------------------------------ AI PLANNER
+  /goals/intake/next-question:
+    post:
+      tags: [AI Planner]
+      summary: Get the next intake question for goal creation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [previousAnswers]
+              properties:
+                previousAnswers:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Next question
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  question: { type: string }
+                  isLastQuestion: { type: boolean }
+
+  /goals/generate-roadmap:
+    post:
+      tags: [AI Planner]
+      summary: Generate a roadmap from a goal title + intake answers
+      description: |
+        Server-side Anthropic call using tool use / structured outputs
+        (a `submit_roadmap` tool matching the Roadmap schema). Falls back to
+        a deterministic template generator if the model call fails or times out.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [goalTitle, answers]
+              properties:
+                goalTitle: { type: string }
+                answers:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Generated roadmap
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roadmap: { $ref: "#/components/schemas/Roadmap" }
+
+  /goals/{id}/planner-messages:
+    parameters:
+      - $ref: "#/components/parameters/GoalId"
+    get:
+      tags: [AI Planner]
+      summary: List planner chat messages for a goal
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated planner messages
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/PlannerMessage" }
+    post:
+      tags: [AI Planner]
+      summary: Send a planner chat message (triggers a server-side AI reply)
+      description: |
+        Non-streaming REST call: waits for the full response and returns it
+        in one JSON payload. Streaming replies (token deltas) are delivered
+        over the WebSocket connection described under Sync, not over this
+        endpoint.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string }
+      responses:
+        "200":
+          description: The AI's reply message
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlannerMessage" }
+
+  # ------------------------------------------------------------- ACTIVITY
+  /activity:
+    get:
+      tags: [Activity]
+      summary: List activity entries (cross-goal or filtered)
+      parameters:
+        - name: goalId
+          in: query
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated activity entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/ActivityEntry" }
+
+  # --------------------------------------------------------- BUILD IN PUBLIC
+  /build-in-public:
+    get:
+      tags: [Build in Public]
+      summary: List build-in-public posts
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated posts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/BuildInPublicPost" }
+    post:
+      tags: [Build in Public]
+      summary: Draft a build-in-public post and queue card image rendering
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [goalId, activityEntryId]
+              properties:
+                goalId: { type: string, format: uuid }
+                activityEntryId: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Draft created; card image render queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildInPublicPost" }
+
+  /build-in-public/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Build in Public]
+      summary: Get a build-in-public post (includes cardImageUrl once ready)
+      responses:
+        "200":
+          description: Post
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildInPublicPost" }
+    patch:
+      tags: [Build in Public]
+      summary: Edit draft post text before posting
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                twitterText: { type: string }
+                linkedinText: { type: string }
+      responses:
+        "200":
+          description: Updated post
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildInPublicPost" }
+
+  /build-in-public/{id}/render:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Build in Public]
+      summary: (Re)render the card image for a post
+      responses:
+        "202":
+          description: Render queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [queued] }
+
+  /build-in-public/generate:
+    post:
+      tags: [Build in Public]
+      summary: Generate multi-platform/multi-format content (threads, articles, summaries, ...) via the AI service
+      description: |
+        Separate from the activity-card flow above. Covers Twitter/LinkedIn
+        short posts and threads, plus Medium/Dev.to/blog long-form content:
+        founder updates, weekly summaries, milestone announcements,
+        long-form articles, and technical blog posts. Content is generated
+        by the AI service (NVIDIA primary, Anthropic fallback; see
+        src/services/ai) and always fully editable afterward via
+        PATCH /build-in-public/generated/{id}.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [goalId, platform, contentType]
+              properties:
+                goalId: { type: string, format: uuid }
+                platform: { type: string, enum: [twitter, linkedin, medium, devto, blog] }
+                contentType:
+                  type: string
+                  enum: [short_post, thread, founder_update, weekly_summary, milestone_announcement, long_form_article, technical_blog_post]
+                activityEntryId:
+                  type: string
+                  format: uuid
+                  description: Ties the post to one specific update. Omit to pull recent activity within timeframeDays instead.
+                milestoneId:
+                  type: string
+                  format: uuid
+                  description: For milestone_announcement. Defaults to the goal's most recently completed milestone if omitted.
+                timeframeDays:
+                  type: integer
+                  description: How far back to pull activity for weekly_summary/founder_update/long-form formats. Default 7.
+                tone:
+                  type: string
+                  description: Optional steering, e.g. "excited", "reflective".
+      responses:
+        "201":
+          description: Generated content
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeneratedPost" }
+
+  /build-in-public/generated:
+    get:
+      tags: [Build in Public]
+      summary: List generated content
+      parameters:
+        - name: goalId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: platform
+          in: query
+          schema: { type: string, enum: [twitter, linkedin, medium, devto, blog] }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated generated content
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/GeneratedPost" }
+
+  /build-in-public/generated/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Build in Public]
+      summary: Get one generated content item
+      responses:
+        "200":
+          description: Generated content
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeneratedPost" }
+    patch:
+      tags: [Build in Public]
+      summary: Edit generated content — fully editable, the model's output is a starting point
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, nullable: true }
+                segments:
+                  type: array
+                  items: { type: string }
+                  description: One element for a single post; multiple, in order, for a thread.
+      responses:
+        "200":
+          description: Updated content
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeneratedPost" }
+    delete:
+      tags: [Build in Public]
+      summary: Delete generated content
+      responses:
+        "204": { description: Deleted }
+
+  # -------------------------------------------------------------- NOTIFICATIONS
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: List notifications
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated notifications
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Notification" }
+
+  /notifications/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Notifications]
+      summary: Mark a notification as read
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                read: { type: boolean }
+      responses:
+        "200":
+          description: Updated notification
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+
+  /notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      responses:
+        "204": { description: All marked read }
+
+  # ------------------------------------------------------------------ SETTINGS
+  /me:
+    get:
+      tags: [Settings]
+      summary: App-boot endpoint - profile + settings + streak in one call
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+    patch:
+      tags: [Settings]
+      summary: Update profile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+    delete:
+      tags: [Settings]
+      summary: Delete account and all data (requires re-auth)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Password or a fresh OTP, since this is irreversible
+              properties:
+                password: { type: string }
+                otp: { type: string }
+      responses:
+        "204": { description: Account deleted }
+
+  /me/settings:
+    get:
+      tags: [Settings]
+      summary: Get user settings
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserSettings" }
+    patch:
+      tags: [Settings]
+      summary: Update user settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                aiSuggestions: { type: boolean }
+                emailReminders: { type: boolean }
+                backgroundGlow: { type: boolean }
+                theme: { type: string, enum: [dark, light] }
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserSettings" }
+
+  /me/export:
+    post:
+      tags: [Settings]
+      summary: Kick off an async data export job (emails a download link)
+      responses:
+        "202":
+          description: Export job started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [queued] }
+
+  # --------------------------------------------------------------- CONNECTIONS
+  /me/connections:
+    get:
+      tags: [Connections]
+      summary: List OAuth connection status
+      responses:
+        "200":
+          description: Connection map
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  github: { type: boolean }
+                  google: { type: boolean }
+                  figma: { type: boolean }
+
+  /me/connections/{provider}:
+    delete:
+      tags: [Connections]
+      summary: Disconnect an OAuth provider
+      parameters:
+        - $ref: "#/components/parameters/OAuthProvider"
+      responses:
+        "204": { description: Disconnected }
+
+  # --------------------------------------------------------------- PUSH TOKENS
+  /me/push-tokens:
+    post:
+      tags: [Push Tokens]
+      summary: Register a device push token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform, token]
+              properties:
+                platform: { type: string, enum: [web, ios, android] }
+                token: { type: string }
+      responses:
+        "201":
+          description: Token registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+
+  /me/push-tokens/{id}:
+    delete:
+      tags: [Push Tokens]
+      summary: Remove a device push token
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Removed }
+
+  # ---------------------------------------------------------------------- SYNC
+  /sync:
+    get:
+      tags: [Sync]
+      summary: Fetch everything changed since a given timestamp
+      description: |
+        Fallback for when the WebSocket isn't connected (RN backgrounded, tab
+        asleep, connection dropped). Called on reconnect/app-foreground.
+      parameters:
+        - name: since
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Changed resources since the given timestamp
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  goals:
+                    type: array
+                    items: { $ref: "#/components/schemas/Goal" }
+                  activity:
+                    type: array
+                    items: { $ref: "#/components/schemas/ActivityEntry" }
+                  notifications:
+                    type: array
+                    items: { $ref: "#/components/schemas/Notification" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived (15 min) access token. Refresh via POST /auth/refresh.
+
+  parameters:
+    GoalId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OAuthProvider:
+      name: provider
+      in: path
+      required: true
+      schema: { type: string, enum: [github, google, figma] }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+      description: Client-generated UUID. Server caches the response for 24h and replays it on retry.
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque pagination cursor from a previous response's nextCursor.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 30, minimum: 1, maximum: 100 }
+
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: TASK_NOT_FOUND }
+            message: { type: string, example: "No task with that id on this goal's roadmap." }
+            requestId: { type: string, example: "req_8f2a..." }
+
+    PaginatedResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {}
+        nextCursor:
+          type: string
+          nullable: true
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        emailVerifiedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    UserSettings:
+      type: object
+      properties:
+        aiSuggestions: { type: boolean }
+        emailReminders: { type: boolean }
+        backgroundGlow: { type: boolean }
+        theme: { type: string, enum: [dark, light] }
+        updatedAt: { type: string, format: date-time }
+
+    Streak:
+      type: object
+      properties:
+        count: { type: integer }
+        longest: { type: integer }
+        lastCompletionDay: { type: string, format: date, nullable: true }
+
+    MeResponse:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        settings: { $ref: "#/components/schemas/UserSettings" }
+        streak: { $ref: "#/components/schemas/Streak" }
+
+    AuthResponse:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        accessToken: { type: string }
+        refreshToken: { type: string }
+
+    Task:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        estimateMinutes: { type: integer }
+        difficulty: { type: string, enum: [easy, medium, hard] }
+        done: { type: boolean }
+
+    Milestone:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        week: { type: integer }
+        title: { type: string }
+        status: { type: string, enum: [done, current, upcoming] }
+        tasks:
+          type: array
+          items: { $ref: "#/components/schemas/Task" }
+
+    Roadmap:
+      type: object
+      properties:
+        milestones:
+          type: array
+          items: { $ref: "#/components/schemas/Milestone" }
+
+    Goal:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        archived: { type: boolean }
+        completed: { type: boolean }
+        completedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        roadmap: { $ref: "#/components/schemas/Roadmap" }
+
+    ActivityEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        goalId: { type: string, format: uuid }
+        taskTitle: { type: string }
+        rawText: { type: string }
+        aiSummary: { type: string }
+        link: { type: string, nullable: true }
+        focusMinutes: { type: integer }
+        source: { type: string, enum: [focus_session, planner_chat] }
+        createdAt: { type: string, format: date-time }
+
+    PlannerMessage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        goalId: { type: string, format: uuid }
+        from: { type: string, enum: [ai, user] }
+        text: { type: string }
+        actionTaskId: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    BuildInPublicPost:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        goalId: { type: string, format: uuid }
+        twitterText: { type: string }
+        linkedinText: { type: string }
+        cardHeadline: { type: string }
+        cardSubline: { type: string }
+        cardImageUrl: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    GeneratedPost:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        goalId: { type: string, format: uuid }
+        platform: { type: string, enum: [twitter, linkedin, medium, devto, blog] }
+        contentType:
+          type: string
+          enum: [short_post, thread, founder_update, weekly_summary, milestone_announcement, long_form_article, technical_blog_post]
+        title: { type: string, nullable: true }
+        segments:
+          type: array
+          items: { type: string }
+          description: One element for a single post; multiple, in order, for a thread.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string }
+        readAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
