@@ -14,8 +14,8 @@ info:
   contact:
     name: Shift
 servers:
-  - url: https://api.shift.app/v1
-    description: Production
+  - url: https://shift-backend-l97v.onrender.com/v1
+    description: Production (Render)
   - url: http://localhost:3000/v1
     description: Local development
 
