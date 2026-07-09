@@ -200,29 +200,87 @@ paths:
   /auth/oauth/{provider}/start:
     get:
       tags: [Auth]
-      summary: Begin an OAuth flow (sign-in or connect-account)
-      security: []
+      summary: Begin an OAuth flow (sign-in, or connect an account from Settings)
+      description: |
+        Redirects the browser to the provider's consent screen. Currently
+        enabled providers depend on which client id/secret env vars are
+        set on the server (`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`,
+        `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`,
+        `FIGMA_CLIENT_ID`/`FIGMA_CLIENT_SECRET`) — an unconfigured provider
+        returns 501 instead of redirecting.
+
+        Two modes, chosen automatically:
+        - **Sign in / sign up**: call this with no Authorization header.
+          `/callback` will find-or-create a user by the provider account's
+          email and log them in.
+        - **Connect an existing account** (e.g. from a Settings page):
+          include the current user's Bearer access token. `/callback` will
+          link the provider to that user instead of starting a new session.
+
+        CSRF state is generated here and tracked server-side with a 10-minute
+        TTL; `/callback` rejects any state it doesn't recognize.
       parameters:
         - $ref: "#/components/parameters/OAuthProvider"
+      security:
+        - bearerAuth: []
+        - {}
       responses:
-        "302": { description: Redirect to the OAuth provider }
+        "302":
+          description: Redirect to the provider's OAuth consent screen.
+        "501":
+          description: This provider's client id/secret aren't configured on the server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   /auth/oauth/{provider}/callback:
     get:
       tags: [Auth]
-      summary: OAuth provider callback
+      summary: OAuth provider callback (the provider redirects here, not called directly)
+      description: |
+        Not meant to be called directly — the provider redirects the user's
+        browser here after consent, with `code` and `state` query params.
+        This endpoint itself never returns JSON to the browser; it always
+        finishes by redirecting again, to one of:
+
+        - **Sign-in succeeded**: `${FRONTEND_URL}/oauth-callback#accessToken=...&refreshToken=...`
+          — the token pair is in the URL *fragment* (after `#`), not the
+          query string, so it never hits server logs or a `Referer` header.
+          The frontend's `/oauth-callback` route reads `window.location.hash`
+          and clears it.
+        - **Connect succeeded** (Bearer token was present on `/start`):
+          `${FRONTEND_URL}/settings?connected={provider}`
+        - **Provider denied consent, or state is invalid/expired**:
+          `${FRONTEND_URL}/oauth-callback?error=...`
       security: []
       parameters:
         - $ref: "#/components/parameters/OAuthProvider"
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
       responses:
-        "200":
-          description: |
-            Web: redirected with tokens in a one-time-use URL fragment.
-            RN: deep-linked back into the app (e.g. `shift://oauth-callback?code=...`),
-            exchanged for tokens in a follow-up POST.
+        "302":
+          description: Redirect back to the frontend — see description for which URL, depending on outcome.
+        "400":
+          description: Missing code/state, or the requested milestone/provider is invalid.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AuthResponse" }
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: State is unrecognized or expired (older than 10 minutes) — restart the flow from /start.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "501":
+          description: This provider's client id/secret aren't configured on the server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   # ---------------------------------------------------------------- GOALS
   /goals:
