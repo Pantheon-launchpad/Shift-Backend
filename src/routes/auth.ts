@@ -8,7 +8,7 @@ import { eq, and } from "drizzle-orm";
 import { signAccessToken, verifyAccessToken, generateRefreshToken, hashRefreshToken, deviceLabelFromUserAgent } from "../lib/tokens";
 import { badRequest, unauthorized, ApiError } from "../lib/errors";
 import { requireAuth, getUserId } from "../middleware/auth";
-import { PROVIDERS, createState, consumeState, buildAuthorizeUrl, exchangeCodeForToken, fetchProfile } from "../lib/oauth";
+import { PROVIDERS, createState, consumeState, buildAuthorizeUrl, exchangeCodeForToken, fetchProfile, finalRedirectBase } from "../lib/oauth";
 
 export const authRouter = Router();
 
@@ -196,7 +196,15 @@ authRouter.get("/oauth/:provider/start", async (req, res, next) => {
       }
     }
 
-    const state = createState(userId ? "connect" : "login", userId);
+    // Which client started this: the web app (redirect back to FRONTEND_URL)
+    // or the React Native app (redirect back to the NATIVE_APP_SCHEME deep
+    // link instead). Defaults to "web" so existing callers don't need to change.
+    const platformParam = typeof req.query.platform === "string" ? req.query.platform : "web";
+    if (platformParam !== "web" && platformParam !== "native") {
+      throw badRequest("INVALID_PLATFORM", 'platform must be "web" or "native".');
+    }
+
+    const state = createState(userId ? "connect" : "login", platformParam, userId);
     res.redirect(buildAuthorizeUrl(provider, config, state));
   } catch (err) {
     next(err);
@@ -214,15 +222,20 @@ authRouter.get("/oauth/:provider/callback", async (req, res, next) => {
     }
 
     const { code, state, error: providerError } = req.query as Record<string, string>;
-    const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
+
+    // Consumed first, before branching on anything else, so every redirect
+    // below — including the provider-denied-consent case — knows whether to
+    // send the user back to the web app or the native app's deep link.
+    // Falls back to "web" if state is missing/invalid/expired, since that's
+    // the safer universal default when we can't tell which client asked.
+    const stateEntry = state ? consumeState(state) : null;
+    const redirectBase = finalRedirectBase(stateEntry?.platform ?? "web");
 
     if (providerError) {
-      res.redirect(`${frontendUrl}/oauth-callback?error=${encodeURIComponent(providerError)}`);
+      res.redirect(`${redirectBase}?error=${encodeURIComponent(providerError)}`);
       return;
     }
     if (!code || !state) throw badRequest("MISSING_CODE", "Missing code or state from provider callback.");
-
-    const stateEntry = consumeState(state);
     if (!stateEntry) throw unauthorized("OAuth state is invalid or expired — please try connecting again.");
 
     const tokenResponse = await exchangeCodeForToken(provider, config, code);
@@ -245,7 +258,16 @@ authRouter.get("/oauth/:provider/callback", async (req, res, next) => {
           set: { accessTokenEncrypted: tokenResponse.access_token, refreshTokenEncrypted: tokenResponse.refresh_token ?? null },
         });
 
-      res.redirect(`${frontendUrl}/settings?connected=${provider}`);
+      // Web: goes to Settings directly, since that's where "connect a
+      // provider" is initiated from. Native: reuses the same
+      // shift://auth-callback deep link as login, distinguished by the
+      // `connected` query param, so the RN app only needs one linking
+      // handler instead of a second "settings" deep link route.
+      const connectRedirect =
+        stateEntry.platform === "native"
+          ? `${redirectBase}?connected=${provider}`
+          : `${process.env.FRONTEND_URL ?? "http://localhost:5173"}/settings?connected=${provider}`;
+      res.redirect(connectRedirect);
       return;
     }
 
@@ -282,10 +304,12 @@ authRouter.get("/oauth/:provider/callback", async (req, res, next) => {
     const session = await issueSession(userId, deviceLabelFromUserAgent(req.headers["user-agent"]));
 
     // Tokens go in the URL fragment (after #), not the query string, so they
-    // never hit server logs or Referer headers — the frontend's
+    // never hit server logs or Referer headers. Web: the frontend's
     // /oauth-callback route reads window.location.hash and clears it.
+    // Native: the RN app's Linking handler for shift://auth-callback reads
+    // the same fragment the same way — url.split('#')[1].
     const fragment = new URLSearchParams({ accessToken: session.accessToken, refreshToken: session.refreshToken }).toString();
-    res.redirect(`${frontendUrl}/oauth-callback#${fragment}`);
+    res.redirect(`${redirectBase}#${fragment}`);
   } catch (err) {
     next(err);
   }

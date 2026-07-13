@@ -217,16 +217,31 @@ paths:
           include the current user's Bearer access token. `/callback` will
           link the provider to that user instead of starting a new session.
 
+        `platform` decides where `/callback` sends the user back once it's
+        done: `web` (default) redirects to `FRONTEND_URL`; `native`
+        redirects to the React Native app's `NATIVE_APP_SCHEME` deep link
+        (e.g. `shift://auth-callback`) instead, so the same backend flow
+        serves both the web app and the RN app.
+
         CSRF state is generated here and tracked server-side with a 10-minute
         TTL; `/callback` rejects any state it doesn't recognize.
       parameters:
         - $ref: "#/components/parameters/OAuthProvider"
+        - name: platform
+          in: query
+          schema: { type: string, enum: [web, native], default: web }
+          description: Which client is starting the flow — decides the redirect target on /callback.
       security:
         - bearerAuth: []
         - {}
       responses:
         "302":
           description: Redirect to the provider's OAuth consent screen.
+        "400":
+          description: Invalid platform value.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "501":
           description: This provider's client id/secret aren't configured on the server.
           content:
@@ -241,17 +256,29 @@ paths:
         Not meant to be called directly — the provider redirects the user's
         browser here after consent, with `code` and `state` query params.
         This endpoint itself never returns JSON to the browser; it always
-        finishes by redirecting again, to one of:
+        finishes by redirecting again, to a target chosen by the `platform`
+        given to `/start`:
 
-        - **Sign-in succeeded**: `${FRONTEND_URL}/oauth-callback#accessToken=...&refreshToken=...`
+        **Web** (`platform=web`, the default):
+        - Sign-in succeeded: `${FRONTEND_URL}/oauth-callback#accessToken=...&refreshToken=...`
           — the token pair is in the URL *fragment* (after `#`), not the
           query string, so it never hits server logs or a `Referer` header.
           The frontend's `/oauth-callback` route reads `window.location.hash`
           and clears it.
-        - **Connect succeeded** (Bearer token was present on `/start`):
-          `${FRONTEND_URL}/settings?connected={provider}`
-        - **Provider denied consent, or state is invalid/expired**:
+        - Connect succeeded: `${FRONTEND_URL}/settings?connected={provider}`
+        - Provider denied consent, or state is invalid/expired:
           `${FRONTEND_URL}/oauth-callback?error=...`
+
+        **Native** (`platform=native`) — everything goes through one deep
+        link, `${NATIVE_APP_SCHEME}` (e.g. `shift://auth-callback`), since a
+        custom URI scheme doesn't have "routes" the way a web app does:
+        - Sign-in succeeded: `shift://auth-callback#accessToken=...&refreshToken=...`
+        - Connect succeeded: `shift://auth-callback?connected={provider}`
+        - Failure: `shift://auth-callback?error=...`
+
+        The RN app's `Linking` handler should branch on which params are
+        present (`accessToken` vs `connected` vs `error`) the same way the
+        web `/oauth-callback` route does.
       security: []
       parameters:
         - $ref: "#/components/parameters/OAuthProvider"
@@ -265,7 +292,7 @@ paths:
           schema: { type: string }
       responses:
         "302":
-          description: Redirect back to the frontend — see description for which URL, depending on outcome.
+          description: Redirect back to the web app or the native app's deep link — see description for which URL, depending on platform and outcome.
         "400":
           description: Missing code/state, or the requested milestone/provider is invalid.
           content:

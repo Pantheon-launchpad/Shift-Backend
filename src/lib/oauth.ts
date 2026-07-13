@@ -52,20 +52,48 @@ export const PROVIDERS: Record<string, OAuthProviderConfig> = {
 };
 
 const STATE_TTL_MS = 10 * 60 * 1000;
-const pendingStates = new Map<string, { createdAt: number; intent: "login" | "connect"; userId?: string }>();
 
-export function createState(intent: "login" | "connect", userId?: string): string {
+export type OAuthPlatform = "web" | "native";
+
+interface PendingState {
+  createdAt: number;
+  intent: "login" | "connect";
+  userId?: string;
+  /** Which client started the flow — decides whether /callback redirects to FRONTEND_URL or the RN app's deep link. */
+  platform: OAuthPlatform;
+}
+
+const pendingStates = new Map<string, PendingState>();
+
+export function createState(intent: "login" | "connect", platform: OAuthPlatform, userId?: string): string {
   const state = randomBytes(24).toString("base64url");
-  pendingStates.set(state, { createdAt: Date.now(), intent, userId });
+  pendingStates.set(state, { createdAt: Date.now(), intent, userId, platform });
   return state;
 }
 
-export function consumeState(state: string) {
+export function consumeState(state: string): PendingState | null {
   const entry = pendingStates.get(state);
   if (!entry) return null;
   pendingStates.delete(state);
   if (Date.now() - entry.createdAt > STATE_TTL_MS) return null;
   return entry;
+}
+
+/**
+ * Where /callback sends the browser/app back to once it's done. Deliberately
+ * a closed choice between two server-configured URLs (FRONTEND_URL or
+ * NATIVE_APP_SCHEME) rather than trusting a client-supplied redirect target
+ * — accepting an arbitrary redirect URL from the request would be an open
+ * redirect vulnerability.
+ */
+export function finalRedirectBase(platform: OAuthPlatform): string {
+  if (platform === "native") {
+    // e.g. "shift://auth-callback" — the RN app registers this custom
+    // scheme and Linking picks it up when the OS opens it.
+    return process.env.NATIVE_APP_SCHEME ?? "shift://auth-callback";
+  }
+  const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
+  return `${frontendUrl}/oauth-callback`;
 }
 
 export function redirectUri(provider: string): string {
