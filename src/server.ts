@@ -16,6 +16,7 @@ import { activityRouter } from "./routes/activity";
 import { buildInPublicRouter } from "./routes/buildInPublic";
 import { notificationsRouter } from "./routes/notifications";
 import { syncRouter } from "./routes/sync";
+import { aiRouter as quickAiRouter } from "./routes/ai";
 
 const app = express();
 
@@ -43,6 +44,10 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 mountDocs(app); // GET /docs, /openapi.yaml, /openapi.json
 
 const v1 = express.Router();
+// Public, unauthenticated quick-assist endpoints (goal intake chat, task
+// suggestions, etc). Intentionally mounted with no requireAuth — see
+// routes/ai.ts for why.
+v1.use("/ai", quickAiRouter);
 v1.use("/auth", authRouter);
 v1.use("/me", meRouter);
 v1.use("/goals", goalsRouter);
